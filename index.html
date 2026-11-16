@@ -78,10 +78,15 @@ input[type=range]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;bac
 .menu button svg{width:26px;height:26px;color:inherit}
 .mgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .menu{width:min(94vw,232px)}
+.bar .add{position:static;width:58px;height:58px;flex:none}
+/* the library drops down from the top, so the soil where the seeds land stays in view */
+#libSheet{top:calc(env(safe-area-inset-top,0px) + 82px);bottom:auto;padding:16px 20px 18px;border-radius:44px 60px 50px 66px / 40px 50px 44px 54px;transform:translateY(-140%);box-shadow:0 10px 34px rgba(0,0,0,.5),4px 5px 0 rgba(255,72,176,.3)}
+#libSheet.on{transform:none}
+#libSheet .lib{max-height:min(44vh,430px)}
 .bigbtn{width:58px;height:58px;flex:none;display:grid;place-items:center;border-radius:var(--bub-1);background-color:var(--card);background-image:var(--grain);box-shadow:2px 3px 0 color-mix(in srgb,var(--mis2) 55%,transparent)}
 .bigbtn:nth-of-type(even){border-radius:var(--bub-2)}
 .bigbtn svg{width:36px;height:36px;display:block}
-@media (max-width:640px){ .bigbtn{width:50px;height:50px} .bigbtn svg{width:30px;height:30px} }
+@media (max-width:640px){ .bar .add{width:50px;height:50px} .bigbtn{width:50px;height:50px} .bigbtn svg{width:30px;height:30px} }
 .mgrid button{height:58px;padding:0;background-color:var(--paper);background-image:var(--grain)}
 .mgrid button:nth-child(odd){border-radius:var(--bub-1)} .mgrid button:nth-child(even){border-radius:var(--bub-2)}
 .mgrid .rdot{width:22px;height:22px;margin:0}
@@ -197,6 +202,10 @@ main{position:relative;z-index:1;flex:1;min-height:0;display:flex}
   <label class="tempo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.7 7.7a2.5 2.5 0 111.8 4.3H2"/><path d="M9.6 4.6A2 2 0 1111 8H2"/><path d="M12.6 19.4A2 2 0 1014 16H2"/></svg> <input id="wind" type="range" min="0" max="1" step="0.01" value="0.3" aria-label="Vindur"></label>
   <button id="songRec" class="chipbtn" data-label="" aria-label="Stoppa upptöku"><span class="rdot"></span><span class="rtxt"></span></button>
   <span class="spacer"></span>
+  <button id="addBtn" class="add" aria-label="Taka upp nýtt hljóð">
+    <svg class="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    <svg class="i-sq" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+  </button>
   <button id="libBtn" class="bigbtn" aria-label="Hljóðasöfn"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="7" cy="7" r="4.2" fill="#FF48B0"/><path d="M17 2l1.7 3.3L22 7l-3.3 1.7L17 12l-1.7-3.3L12 7l3.3-1.7z" fill="#FFE800"/><rect x="3" y="13.5" width="8" height="8" rx="2.4" fill="#5EC8E5"/><path d="M17 13l4.6 8.2h-9.2z" fill="#00A95C"/></svg></button>
   <button id="scaleBtn" class="bigbtn"></button>
   <button id="skyBtn" class="bigbtn"></button>
@@ -210,10 +219,6 @@ main{position:relative;z-index:1;flex:1;min-height:0;display:flex}
     <div id="soil" class="soil"></div>
     <canvas id="cv" aria-label="Hljóðstrá: fræ, stilkar og hljóð"></canvas>
     <div id="hint" class="hint" role="status"></div>
-    <button id="addBtn" class="add" aria-label="Taka upp nýtt hljóð">
-      <svg class="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      <svg class="i-sq" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
-    </button>
   </div>
 </main>
 
@@ -892,9 +897,8 @@ function layout(){
   cv.width = Math.round(W*dpr); cv.height = Math.round(H*dpr);
   GH = H < 420 ? 76 : 96; $('#soil').style.height = GH + 'px';
   groundY = H - GH + 20; FH = Math.max(120, groundY - 16);
-  padL = W < 560 ? 84 : 104; padR = 14; slotW = (W - padL - padR)/MAXS; seedR = clamp(slotW*0.36, 14, 26);
+  padL = 14; padR = 14; slotW = (W - padL - padR)/MAXS; seedR = clamp(slotW*0.36, 14, 26);
   maxLat = clamp(W*0.17, 56, 230);
-  var ab = $('#addBtn'); ab.style.bottom = Math.max(8, (GH - 60)/2 - 2) + 'px';
   sounds.forEach(buildGeo);
   motes.length = 0; blades.length = 0;
 }
