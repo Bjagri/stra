@@ -1069,7 +1069,7 @@ var hintMode = '';      // which wordless nudge to show: add a sound, draw a sta
 function updateHint(){
   hintMode = rec ? '' : !sounds.length ? 'add' : !sounds.some(function(s){ return s.pts; }) ? 'draw'
     : !sounds.some(function(s){ return s.buds.length; }) ? 'tap' : !everPlayed ? 'play' : '';
-  $('#addBtn').classList.toggle('nudge', hintMode === 'add'); $('#playBtn').classList.toggle('nudge', hintMode === 'play');
+  $('#addBtn').classList.toggle('nudge', hintMode === 'add'); $('#libBtn').classList.toggle('nudge', hintMode === 'add'); $('#libBtn').classList.toggle('nudge', hintMode === 'add'); $('#playBtn').classList.toggle('nudge', hintMode === 'play');
 }
 function drawHints(){
   if (gest || draft) return;
