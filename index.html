@@ -714,7 +714,8 @@ function undo(){
 var ctx = null, A = {}, panOK = false;
 function gainNode(v){ var x = ctx.createGain(); x.gain.value = v; return x; }
 function filt(type, f, q){ var b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; if (q) b.Q.value = q; return b; }
-function pulse(){ return 60 / S.bpm; }
+var SL = 1;                                     // slow motion: 1 = normal, ~0.45 while the compass is open
+function pulse(){ return 60 / S.bpm / SL; }
 function crushCurve(){
   var n = 2048, c = new Float32Array(n), lv = 5;
   for (var i=0;i<n;i++){ var x = i/(n-1)*2 - 1; c[i] = Math.round(Math.tanh(x*1.8)*lv)/lv; }
@@ -735,7 +736,9 @@ function ensureCtx(){
   var comp = ctx.createDynamicsCompressor();
   comp.threshold.value = -15; comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.25;
   A.tone = filt('lowpass', 9000, 0.5);
-  A.master.connect(A.tone); A.tone.connect(comp); comp.connect(ctx.destination); A.final = comp; skyLast = -1;
+  A.duckG = gainNode(1); A.duck = filt('lowpass', 20000, 0.9);
+  A.master.connect(A.duckG); A.duckG.connect(A.duck); A.duck.connect(A.tone); A.tone.connect(comp); comp.connect(ctx.destination); A.final = comp; skyLast = -1;
+  A.focus = gainNode(1); A.focus.connect(comp);       // the note under the compass skips the muffling
   A.verb = ctx.createConvolver(); A.verb.buffer = impulse(4.2, 2.4);
   var vOut = gainNode(0.7); A.vOut = vOut; A.verb.connect(vOut); vOut.connect(A.master);
   A.dIn = gainNode(1); A.d = ctx.createDelay(3); A.dFb = gainNode(0.44 + windX()*0.3); A.dLp = filt('lowpass', 2600);
@@ -861,7 +864,7 @@ function schedule(){
   while (nextT < ahead){
     vq.push({t:nextT, tick:tick});
     for (var i=0;i<sounds.length;i++){
-      var s = sounds[i]; if (!s.geo || !s.buds.length || s.mute) continue;
+      var s = sounds[i]; if (!s.geo || !s.buds.length || s.mute || (compass && compass.s === s)) continue;
       var G2 = 2*s.N, j = tick % G2, fired = false;
       for (var k=0;k<s.buds.length;k++){
         var b = s.buds[k]; if (qOf(s, b) % G2 !== j) continue;
@@ -1137,8 +1140,41 @@ function addBud(s, u){
   var p = pointAt(s.geo.Q, s.geo, u); ripples.push({x:p.x, y:p.y, t0:T, col:colOf(s)});
   dbPut(s); updateHint();
 }
-var compass = null, CR = 92;
-function openCompass(s, b){ compass = {s:s, b:b, x:clamp(b.x, CR + 10, W - CR - 10), y:clamp(b.y, CR + 10, H - CR - 10), a:0}; }
+var compass = null, CR = 104, veil = 0;
+function openCompass(s, b){
+  if (compass) closeCompass();
+  compass = {s:s, b:b, x:clamp(b.x, CR + 16, W - CR - 16), y:clamp(b.y, CR + 16, H - CR - 16), a:0, nx:0, hit:0, pop:0, ph:Math.random()*6};
+  if (!ctx) return;
+  var C = chan(s);
+  try { C.out.disconnect(A.master); } catch(e){}
+  C.out.connect(A.focus);
+  var t = ctx.currentTime;
+  A.duck.frequency.cancelScheduledValues(t); A.duck.frequency.setTargetAtTime(560, t, 0.16);
+  A.duckG.gain.cancelScheduledValues(t); A.duckG.gain.setTargetAtTime(0.55, t, 0.2);
+}
+function closeCompass(){
+  var c = compass; compass = null; if (!c || !ctx) return;
+  var C = c.s.ch;
+  if (C){ try { C.out.disconnect(A.focus); } catch(e){} C.out.connect(A.master); }
+  var t = ctx.currentTime;
+  A.duck.frequency.cancelScheduledValues(t); A.duck.frequency.setTargetAtTime(20000, t, 0.22);
+  A.duckG.gain.cancelScheduledValues(t); A.duckG.gain.setTargetAtTime(1, t, 0.25);
+}
+/* While the compass is open the note plays on its own, over and over, so you hear each change */
+function audPeriod(c){
+  var b = c.b, s = c.s, half = pulse()/2, n = budN(b), rate = Math.pow(2, semiOf(s, b, budP(b))/12);
+  return Math.max(pulse()*2, (n + 1)*half + pulse()*0.75, (s.end - s.start)/rate + 0.3);
+}
+function audition(){
+  var c = compass; if (!c || !ctx) return;
+  var now = ctx.currentTime;
+  if (now >= c.nx - 0.04){
+    var t = Math.max(now + 0.02, c.nx);
+    playBud(c.s, c.b, t, 1);
+    c.hit = t; c.nx = t + audPeriod(c);
+  }
+  if (c.hit && now >= c.hit){ c.hit = 0; c.pop = 1; c.b.pop = 1; c.s.shake = 1; ripples.push({x:c.kx || c.x, y:c.ky || c.y, t0:T, col:colOf(c.s)}); }
+}
 var muteTold = false;
 function toggleMute(s){
   pushUndo(); s.mute = !s.mute; s.pop = 1;
@@ -1172,12 +1208,16 @@ cv.addEventListener('pointermove', function(e){
     var b = h.b, p0 = budP(b), n0 = budN(b), r0 = budR(b) > 0;
     var nx = clamp(gest.c0.cx + (p.x - gest.x0)/CR, -1, 1), ny = clamp(gest.c0.cy - (p.y - gest.y0)/CR, -1, 1);
     b.cx = Math.abs(nx) < 0.1 ? 0 : nx; b.cy = Math.abs(ny) < 0.07 ? 0 : ny;
-    if ((budP(b) !== p0 || budN(b) !== n0 || (budR(b) > 0) !== r0) && ctx && performance.now() - (gest.lastP || 0) > 140){ gest.lastP = performance.now(); b.pop = 0.5; trigger(h.s, ctx.currentTime + 0.01, semiOf(h.s, b, budP(b)), 0.9, 0); }
+    if ((budP(b) !== p0 || budN(b) !== n0 || (budR(b) > 0) !== r0) && ctx && compass && performance.now() - (gest.lastP || 0) > 120){
+      gest.lastP = performance.now();
+      (h.s.voices || []).forEach(function(v){ choke(v, ctx.currentTime); });
+      compass.nx = 0; compass.tick = 1;
+    }
   }
 });
 function endGest(e, cancel){
   if (!gest || (e && e.pointerId !== gest.pid)) return;
-  var G = gest, h = G.hit; gest = null; clearTimeout(G.hold); clearTimeout(G.show); compass = null;
+  var G = gest, h = G.hit; gest = null; clearTimeout(G.hold); clearTimeout(G.show); closeCompass();
   if (cancel){ draft = null; return; }
   if (h.k === 'seed'){ if (G.held) draft = null; else if (G.moved) finishDraft(); else openPop(h.s); }
   else if (h.k === 'bud'){
@@ -1319,7 +1359,10 @@ syncMenu();
 
 /* ================= Drawing ================= */
 var T = 0, lastF = performance.now(), ripples = [], motes = [], dots = null;
+var dotsL = null;
 function makeDots(){
+  try { var c2 = document.createElement('canvas'); c2.width = c2.height = 5; var x2 = c2.getContext('2d');
+    x2.fillStyle = 'rgba(243,238,228,.09)'; x2.beginPath(); x2.arc(2.5, 2.5, 0.95, 0, 6.2832); x2.fill(); dotsL = g.createPattern(c2, 'repeat'); } catch(e){}
   try { var c = document.createElement('canvas'); c.width = c.height = 6; var x = c.getContext('2d');
     x.fillStyle = 'rgba(18,20,42,.2)'; x.beginPath(); x.arc(3, 3, 1.1, 0, 6.2832); x.fill(); dots = g.createPattern(c, 'repeat'); } catch(e){}
 }
@@ -1481,32 +1524,98 @@ function drawGrass(){
     g.fill();
   }
 }
-function drawCompass(){
-  var c = compass; if (!c) return;
-  c.a = Math.min(1, c.a + 0.14);
-  var x = c.x, y = c.y, R = CR, ink = '243,238,228', i, col = colOf(c.s);
-  ga(c.a);
-  var gr = g.createRadialGradient(x, y, R*0.2, x, y, R*1.4);      // soft, see-through disc
-  gr.addColorStop(0, 'rgba(14,16,36,.8)'); gr.addColorStop(0.7, 'rgba(14,16,36,.66)'); gr.addColorStop(1, 'rgba(14,16,36,0)');
-  g.fillStyle = gr; g.beginPath(); g.arc(x, y, R*1.4, 0, 6.2832); g.fill();
-  g.strokeStyle = 'rgba(' + ink + ',.28)'; g.lineWidth = 1.5; g.beginPath(); g.arc(x, y, R, 0, 6.2832); g.stroke();
-  g.setLineDash([2, 7]); g.beginPath(); g.moveTo(x - R + 34, y); g.lineTo(x + R - 34, y); g.moveTo(x, y - R + 34); g.lineTo(x, y + R - 34); g.stroke(); g.setLineDash([]);
-  g.strokeStyle = 'rgba(' + ink + ',.92)'; g.fillStyle = 'rgba(' + ink + ',.92)'; g.lineWidth = 3.2; g.lineCap = 'round';
-  g.beginPath(); g.moveTo(x - 8, y - R + 17); g.lineTo(x + 8, y - R + 17); g.moveTo(x, y - R + 9); g.lineTo(x, y - R + 25); g.stroke();      // +
-  g.beginPath(); g.moveTo(x - 8, y + R - 17); g.lineTo(x + 8, y + R - 17); g.stroke();                                                    // -
-  for (i=0;i<4;i++){ ga(c.a*(1 - i*0.22)); g.beginPath(); g.arc(x + R - 31 + i*7.5, y, 4.4 - i*0.9, 0, 6.2832); g.fill(); }             // right: echoes
-  var wg = g.createLinearGradient(x - R + 8, 0, x - R + 34, 0); wg.addColorStop(0, 'rgba(' + ink + ',0)'); wg.addColorStop(1, 'rgba(' + ink + ',.95)');
-  ga(c.a); g.fillStyle = wg; g.beginPath(); g.moveTo(x - R + 8, y); g.lineTo(x - R + 34, y - 9); g.lineTo(x - R + 34, y + 9); g.closePath(); g.fill();   // left: backwards swell
-  g.fillStyle = 'rgba(' + ink + ',.6)';
-  var d = R*0.6;
-  for (i=0;i<3;i++){ g.beginPath(); g.arc(x + d - 7 + i*7, y - d + 7 - i*7, 2.6, 0, 6.2832); g.fill(); g.beginPath(); g.arc(x + d - 7 + i*7, y + d - 7 + i*7, 2.6, 0, 6.2832); g.fill(); }   // diagonals right: echoes that climb or fall
-  g.beginPath(); g.moveTo(x - d - 9, y - d - 9); g.lineTo(x - d + 8, y - d + 1); g.lineTo(x - d + 1, y - d + 8); g.closePath(); g.fill();                                                    // diagonals left: high or low swell
-  g.beginPath(); g.moveTo(x - d - 9, y + d + 9); g.lineTo(x - d + 8, y + d - 1); g.lineTo(x - d + 1, y + d - 8); g.closePath(); g.fill();
-  var kx = x + (c.b.cx || 0)*R, ky = y - (c.b.cy || 0)*R;
-  g.strokeStyle = col; g.lineWidth = 3; g.beginPath(); g.moveTo(x, y); g.lineTo(kx, ky); g.stroke();
-  g.fillStyle = 'rgba(' + ink + ',.5)'; g.beginPath(); g.arc(x, y, 4, 0, 6.2832); g.fill();
-  drawShape(shpOf(c.s), kx, ky, 15, 0, col, MISC[c.s.v % 8], 2, false);
-  g.strokeStyle = '#F3EEE4'; g.lineWidth = 2; tracePath(shpOf(c.s), kx, ky, 18, 0); g.stroke();
+function blobPath(x, y, R, ph, amp){
+  g.beginPath();
+  for (var i=0;i<=56;i++){
+    var a = i/56*6.2832, r = R*(1 + amp*(0.55*Math.sin(3*a + ph) + 0.35*Math.sin(5*a - ph*1.3) + 0.25*Math.sin(2*a + ph*0.6)));
+    var X = x + Math.cos(a)*r, Y = y + Math.sin(a)*r; if (i) g.lineTo(X, Y); else g.moveTo(X, Y);
+  }
+  g.closePath();
+}
+function plusGlyph(x, y, sz, minus){
+  g.beginPath(); g.moveTo(x - sz, y); g.lineTo(x + sz, y); if (!minus){ g.moveTo(x, y - sz); g.lineTo(x, y + sz); } g.stroke();
+}
+function easeBack(t){ var c1 = 1.5; return 1 + (c1 + 1)*Math.pow(t - 1, 3) + c1*Math.pow(t - 1, 2); }
+function drawCompass(rdt){
+  var c = compass;
+  if (!c){ veil = Math.max(0, veil - rdt*3); if (veil > 0){ g.fillStyle = 'rgba(6,7,18,' + (0.42*veil).toFixed(3) + ')'; g.fillRect(0, 0, W, H); } return; }
+  veil = Math.min(1, veil + rdt*4);
+  c.a = Math.min(1, c.a + rdt*4.2); c.pop = Math.max(0, c.pop - rdt*2.4);
+  var e = easeBack(c.a), R = CR*e, x = c.x, y = c.y, ph = c.ph + T*0.5, i, k;
+  var col = colOf(c.s), mis = MISC[c.s.v % 8], ink = '243,238,228', b = c.b;
+  var P = budP(b), N = budN(b), RV = budR(b);
+
+  /* the meadow dims behind it */
+  g.fillStyle = 'rgba(6,7,18,' + (0.42*veil).toFixed(3) + ')'; g.fillRect(0, 0, W, H);
+  if (R < 4) return;
+
+  /* depth: a soft shadow, then the misprinted second ink, then the see-through body */
+  ga(0.35); g.fillStyle = '#05060E'; blobPath(x + 7, y + 11, R*1.04, ph, 0.05); g.fill();
+  ga(0.5); g.fillStyle = mis; blobPath(x + 5, y + 6, R, ph + 0.4, 0.045); g.fill();
+  ga(0.78); g.fillStyle = '#22264A'; blobPath(x, y, R, ph, 0.045); g.fill();
+  ga(1);
+  var glow = g.createRadialGradient(x, y - R*0.2, R*0.05, x, y, R*1.05);
+  glow.addColorStop(0, col); glow.addColorStop(1, 'rgba(34,38,74,0)');
+  ga(0.22 + c.pop*0.18); g.fillStyle = glow; blobPath(x, y, R, ph, 0.045); g.fill();
+  if (dotsL){ ga(1); g.fillStyle = dotsL; g.fill(); }
+
+  /* inner rings, each a little out of round */
+  g.lineWidth = 1.4; g.setLineDash([2, 6]);
+  for (k=1;k<=2;k++){ ga(0.18); g.strokeStyle = 'rgb(' + ink + ')'; blobPath(x, y, R*k/3, ph*1.3 + k, 0.07); g.stroke(); }
+  g.setLineDash([]);
+  ga(0.35); g.strokeStyle = 'rgb(' + ink + ')'; g.lineWidth = 2; blobPath(x, y, R, ph, 0.045); g.stroke();
+
+  /* pitch: a column of beads that light up step by step */
+  var reach = R - 34;
+  for (k=1;k<=7;k++){
+    var on = (P > 0 && k <= P), on2 = (P < 0 && k <= -P), dy = k/7*reach;
+    ga(on ? 0.95 : 0.22); g.fillStyle = on ? col : 'rgb(' + ink + ')'; g.beginPath(); g.arc(x, y - dy, on ? 3.6 : 2.2, 0, 6.2832); g.fill();
+    ga(on2 ? 0.95 : 0.22); g.fillStyle = on2 ? col : 'rgb(' + ink + ')'; g.beginPath(); g.arc(x, y + dy, on2 ? 3.6 : 2.2, 0, 6.2832); g.fill();
+  }
+  /* echoes: dots to the right, as many as will play */
+  for (k=1;k<=6;k++){
+    var onE = k <= N, ex = x + 14 + (k - 1)/5*(reach - 14);
+    ga(onE ? 0.95*Math.pow(0.86, k - 1) : 0.2); g.fillStyle = onE ? col : 'rgb(' + ink + ')';
+    g.beginPath(); g.arc(ex, y - (onE && P ? Math.sign(P)*k*2.2 : 0), onE ? 3.8 - k*0.25 : 2, 0, 6.2832); g.fill();
+  }
+  /* backwards swell: a wedge to the left that fills as you pull */
+  var wx0 = x - reach, wx1 = x - 14;
+  ga(0.2); g.fillStyle = 'rgb(' + ink + ')'; g.beginPath(); g.moveTo(wx0, y); g.lineTo(wx1, y - 7); g.lineTo(wx1, y + 7); g.closePath(); g.fill();
+  if (RV > 0){
+    var wf = wx1 - (wx1 - wx0)*RV, wh = 7*(wx1 - wf)/(wx1 - wx0);
+    var wg = g.createLinearGradient(wf, 0, wx1, 0); wg.addColorStop(0, 'rgba(0,0,0,0)'); wg.addColorStop(1, col);
+    ga(0.95); g.fillStyle = wg; g.beginPath(); g.moveTo(wf, y - 7 + wh); g.lineTo(wx1, y - 7); g.lineTo(wx1, y + 7); g.lineTo(wf, y + 7 - wh); g.closePath(); g.fill();
+  }
+
+  /* the four signs at the rim, printed twice like the rest */
+  g.lineCap = 'round'; g.lineWidth = 4;
+  var gy = R - 15;
+  ga(0.55); g.strokeStyle = mis; plusGlyph(x + 2, y - gy + 2.5, 8, false); plusGlyph(x + 2, y + gy + 2.5, 8, true);
+  ga(0.95); g.strokeStyle = 'rgb(' + ink + ')'; plusGlyph(x, y - gy, 8, false); plusGlyph(x, y + gy, 8, true);
+  ga(0.9); g.fillStyle = 'rgb(' + ink + ')';
+  for (k=0;k<3;k++){ g.beginPath(); g.arc(x + gy - 6 + k*6.5, y, 4.2 - k*1.1, 0, 6.2832); g.fill(); }
+  var fg = g.createLinearGradient(x - gy - 9, 0, x - gy + 9, 0); fg.addColorStop(0, 'rgba(' + ink + ',0)'); fg.addColorStop(1, 'rgba(' + ink + ',.95)');
+  g.fillStyle = fg; g.beginPath(); g.moveTo(x - gy - 10, y); g.lineTo(x - gy + 9, y - 9); g.lineTo(x - gy + 9, y + 9); g.closePath(); g.fill();
+  var dd = R*0.64; ga(0.45);
+  for (k=0;k<3;k++){ g.beginPath(); g.arc(x + dd - 7 + k*6, y - dd + 7 - k*6, 2.3, 0, 6.2832); g.fill(); g.beginPath(); g.arc(x + dd - 7 + k*6, y + dd - 7 + k*6, 2.3, 0, 6.2832); g.fill(); }
+  g.beginPath(); g.moveTo(x - dd - 8, y - dd - 8); g.lineTo(x - dd + 7, y - dd + 1); g.lineTo(x - dd + 1, y - dd + 7); g.closePath(); g.fill();
+  g.beginPath(); g.moveTo(x - dd - 8, y + dd + 8); g.lineTo(x - dd + 7, y + dd - 1); g.lineTo(x - dd + 1, y + dd - 7); g.closePath(); g.fill();
+
+  /* the hand: a little stem from the centre, thick at the root like the stalks */
+  var kx = x + (b.cx || 0)*R, ky = y - (b.cy || 0)*R, ddx = kx - x, ddy = ky - y, L = Math.hypot(ddx, ddy);
+  c.kx = kx; c.ky = ky;
+  if (L > 6){
+    var nx = -ddy/L, ny = ddx/L;
+    ga(0.5); g.fillStyle = mis; g.beginPath(); g.moveTo(x + nx*5 + 2, y + ny*5 + 3); g.lineTo(kx + nx*1.5 + 2, ky + ny*1.5 + 3); g.lineTo(kx - nx*1.5 + 2, ky - ny*1.5 + 3); g.lineTo(x - nx*5 + 2, y - ny*5 + 3); g.closePath(); g.fill();
+    ga(1); g.fillStyle = col; g.beginPath(); g.moveTo(x + nx*5, y + ny*5); g.lineTo(kx + nx*1.5, ky + ny*1.5); g.lineTo(kx - nx*1.5, ky - ny*1.5); g.lineTo(x - nx*5, y - ny*5); g.closePath(); g.fill();
+  }
+  ga(1); g.fillStyle = col; blobPath(x, y, 6.5, ph*2, 0.12); g.fill();
+
+  /* the knob is the sound's own shape; it swells each time the note plays */
+  var kr = 17*(1 + c.pop*0.28);
+  ga(0.3); g.fillStyle = col; g.beginPath(); g.arc(kx, ky, kr*1.9, 0, 6.2832); g.fill();
+  ga(1); drawShape(shpOf(c.s), kx, ky, kr, Math.sin(T*1.4)*0.15, col, mis, 3, true);
+  g.strokeStyle = 'rgba(' + ink + ',.9)'; g.lineWidth = 2; tracePath(shpOf(c.s), kx, ky, kr + 3.5, Math.sin(T*1.4)*0.15); g.stroke();
   ga(1);
 }
 function drawSeed(s, dt){
@@ -1522,7 +1631,14 @@ function drawSeed(s, dt){
   GA = 1; ga(1);
 }
 function frame(now){
-  var dt = Math.min(0.05, (now - lastF)/1000); lastF = now; T += dt;
+  var rdt = Math.min(0.05, (now - lastF)/1000); lastF = now;
+  var SLT = compass ? 0.45 : 1, wasSL = SL;
+  SL += (SLT - SL)*Math.min(1, rdt*(compass ? 5 : 3));
+  if (Math.abs(SL - SLT) < 0.003) SL = SLT;
+  if (ctx && Math.abs(SL - wasSL) > 0.002) syncDelay();
+  var dt = rdt*(0.22 + 0.78*(SL - 0.45)/0.55);         // the picture slows down even more than the music
+  T += dt;
+  audition();
   if (W){
     g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
     WT += dt*(0.45 + S.wind*1.8);
@@ -1552,7 +1668,7 @@ function frame(now){
       return true;
     });
     for (i=0;i<sounds.length;i++) drawSeed(sounds[i], dt);
-    drawHints(); drawCompass();
+    drawHints(); drawCompass(rdt);
   }
   requestAnimationFrame(frame);
 }
