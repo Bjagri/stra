@@ -1,0 +1,20 @@
+{
+  "id": "./",
+  "name": "Hljóðstrá",
+  "short_name": "Hljóðstrá",
+  "description": "Ræktaðu hljóð: fræ, strá og fljótandi taktur.",
+  "lang": "is",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#12142A",
+  "theme_color": "#12142A",
+  "categories": ["music", "education"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

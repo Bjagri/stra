@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Hljóðstrá</title>
+<meta name="description" content="Ræktaðu hljóð: fræ, strá og fljótandi taktur.">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#12142A">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Hljóðstrá">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -28,7 +37,7 @@ body{
   margin:0;height:100%;display:flex;flex-direction:column;overflow:hidden;
   background-color:var(--paper);background-image:var(--grain);color:var(--ink);
   font-family:"Fredoka","Baloo 2",ui-rounded,"Arial Rounded MT Bold","Trebuchet MS",system-ui,sans-serif;
-  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+  -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;overscroll-behavior:none;
 }
 button{font:inherit;color:inherit;border:0;background:none;cursor:pointer;touch-action:manipulation;transition:transform .18s cubic-bezier(.3,1.6,.5,1),background-color .25s,color .25s}
 button:active{transform:scale(.94)}
@@ -2079,6 +2088,12 @@ makeDots(); layout(); updateHint();
 if (window.ResizeObserver) new ResizeObserver(layout).observe(field); else window.addEventListener('resize', layout);
 loadAll();
 requestAnimationFrame(frame);
+/* Installable app: works offline once opened, and asks the browser to keep recordings safe */
+try {
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost'))
+    navigator.serviceWorker.register('sw.js').catch(function(){});
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function(){});
+} catch(e){}
 })();
 </script>
 </body>
