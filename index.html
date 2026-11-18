@@ -839,11 +839,45 @@ function playRev(s, t, rate, vol){
 /* Smear: the seed's sound is stretched along the stalk. Bottom of the stalk = start of the sound,
    top = end. As the light climbs, overlapping grains are read from that point in the sound, so it
    never has a start or an end. Only one stalk can carry a smear at a time. */
+/* A softened copy of the sound for smearing. The whole sound is known in advance, so its loudness
+   envelope can be traced both ways; then a new envelope is drawn that may only RISE slowly
+   (30–90 ms, slower for spikier sounds) but falls with the sound. Every hit, click or crack now
+   fades in instead of striking, while the body and tail stay as they were. Spikier sounds also
+   get a darker filter after it. */
+function smearSrc(s){
+  var key = s.start + '|' + s.end;
+  if (s.smB && s.smKey === key) return s.smB;
+  var d = s.data, n = d.length, sr = s.sr, i, v;
+  var a0 = s.start*sr | 0, a1 = Math.min(n, s.end*sr | 0), pk = 0, sq = 0;
+  for (i=a0;i<a1;i++){ var x0 = Math.abs(d[i]); if (x0 > pk) pk = x0; sq += x0*x0; }
+  var rms = Math.sqrt(sq/Math.max(1, a1 - a0)) || 1e-4, crest = pk/rms;
+  var att = clamp(0.03 + (crest - 3)*0.008, 0.03, 0.09);
+  var a = 1 - Math.exp(-1/(0.004*sr)), ra = 1 - Math.exp(-1/(att*sr)), env = new Float32Array(n);
+  for (v=0, i=0;i<n;i++){ v += (Math.abs(d[i]) - v)*a; env[i] = v; }
+  for (v=0, i=n-1;i>=0;i--){ v += (env[i] - v)*a; env[i] = v; }
+  var out = new Float32Array(n), osq = 0;
+  for (v=0, i=0;i<n;i++){
+    var e = env[i];
+    v = e > v ? v + (e - v)*ra : e;                                 // rise slowly, fall with the sound
+    out[i] = d[i]*Math.min(1, (v + 1e-6)/(e + 1e-6));
+    if (i >= a0 && i < a1) osq += out[i]*out[i];
+  }
+  var orms = Math.sqrt(osq/Math.max(1, a1 - a0)) || 1e-4, mk = Math.min(3, rms/orms*0.85);
+  for (i=0;i<n;i++) out[i] *= mk;
+  var b = ctx.createBuffer(1, n, sr); b.getChannelData(0).set(out);
+  s.smB = b; s.smKey = key; s.smCrest = crest;
+  if (s.smLp) s.smLp.frequency.setTargetAtTime(smearCut(s), ctx.currentTime, 0.1);
+  return b;
+}
+function smearCut(s){ return clamp(4800 - ((s.smCrest || 4) - 3)*520, 1300, 4800); }
+var HANN = (function(){ var c = new Float32Array(48); for (var i=0;i<48;i++) c[i] = 0.5 - 0.5*Math.cos(2*Math.PI*i/47); return c; })();
 function smearBus(s){
   if (s.smIn) return s.smIn;
-  var C = chan(s), lp = filt('lowpass', 4200, 0.4);
-  s.smIn = gainNode(1); s.smIn.connect(lp); lp.connect(C.in);
-  var wet = gainNode(0.55); s.smIn.connect(wet); wet.connect(A.verb);
+  var C = chan(s); smearSrc(s);
+  s.smLp = filt('lowpass', smearCut(s), 0.3);
+  var lp2 = filt('lowpass', smearCut(s)*1.6, 0.3);                // two gentle filters in a row: soft, not muffled
+  s.smIn = gainNode(1); s.smIn.connect(s.smLp); s.smLp.connect(lp2); lp2.connect(C.in);
+  var wet = gainNode(0.6); s.smIn.connect(wet); wet.connect(A.verb);
   return s.smIn;
 }
 function smearAmp(sm, u){
@@ -851,17 +885,18 @@ function smearAmp(sm, u){
   var e = 0.07; return clamp((u - sm.u0 + e)/(2*e), 0, 1)*clamp((sm.u1 - u + e)/(2*e), 0, 1);
 }
 function smearGrains(s, t0, half, tk){
-  var sm = s.smear, G2 = 2*s.N, n = clamp(Math.round(half*15), 2, 8), bus = smearBus(s), b = buf(s), len = Math.max(0.05, s.end - s.start);
+  var sm = s.smear, G2 = 2*s.N, n = clamp(Math.round(half*15), 2, 8), bus = smearBus(s), b = smearSrc(s), len = Math.max(0.05, s.end - s.start);
   for (var k=0;k<n;k++){
     var f = (k + Math.random()*0.8)/n, gt = t0 + f*half;
     var uL = warp(s, ((tk % G2) + f)/G2), amp = smearAmp(sm, uL);
     if (amp < 0.02) continue;
-    var size = (0.16 + Math.random()*0.18)*(1 - S.wind*0.35), rate = (Math.random() < 0.22 ? 0.5 : 1)*Math.pow(2, (Math.random() - 0.5)*0.012);
+    var size = (0.26 + Math.random()*0.22)*(1 - S.wind*0.3), rate = (Math.random() < 0.22 ? 0.5 : 1)*Math.pow(2, (Math.random() - 0.5)*0.012);
     var jit = (Math.random() - 0.5)*(0.05 + S.wind*0.25)*len;
     var off = clamp(s.start + uL*len + jit, 0, Math.max(0, s.dur - size*rate - 0.01));
     var src = ctx.createBufferSource(); src.buffer = b; src.playbackRate.value = rate;
-    var gn = ctx.createGain(), gv = 0.3*s.norm*amp;
-    gn.gain.setValueAtTime(0, gt); gn.gain.linearRampToValueAtTime(gv, gt + size*0.5); gn.gain.linearRampToValueAtTime(0, gt + size);
+    var gn = ctx.createGain(), gv = 0.22*s.norm*amp, cv = new Float32Array(HANN.length);
+    for (var q=0;q<cv.length;q++) cv[q] = HANN[q]*gv;                // round, bell-shaped grains: no corners to click
+    gn.gain.value = 0; gn.gain.setValueCurveAtTime(cv, gt, size);
     src.connect(gn);
     var node = gn;
     if (panOK){ var p = ctx.createStereoPanner(); p.pan.value = (Math.random()*2 - 1)*(0.35 + S.wind*0.5); gn.connect(p); node = p; }
@@ -1227,7 +1262,7 @@ function applySmear(st){
   if (u0 < 0.04) u0 = 0; if (u1 > 0.96) u1 = 1;
   sounds.forEach(function(o){ if (o !== s && o.smear){ o.smear = null; dbPut(o); } });      // only one stalk can be smeared
   s.smear = s.smear ? {u0:Math.min(s.smear.u0, u0), u1:Math.max(s.smear.u1, u1)} : {u0:u0, u1:u1};
-  s.shake = 1; dbPut(s);
+  s.shake = 1; dbPut(s); if (ctx) smearSrc(s);
   if (s.geo){ var q = pointAt(s.geo.Q, s.geo, (s.smear.u0 + s.smear.u1)/2); ripples.push({x:q.x, y:q.y, t0:T, col:colOf(s), big:1}); }
 }
 cv.addEventListener('pointerdown', function(e){
