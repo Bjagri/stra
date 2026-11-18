@@ -692,7 +692,7 @@ function playBud(s, b, t, vol){
 
 /* ================= Undo ================= */
 var undoStack = [], graveyard = new Map();
-function metaOf(s){ return {id:s.id, slot:s.slot, v:s.v, fx:s.fx, pts:s.pts ? s.pts.map(function(p){ return p.slice(); }) : null, buds:s.buds.map(function(b){ return {u:b.u, m:b.m ? 1 : 0, cx:b.cx || 0, cy:b.cy || 0}; }), N:s.N, start:s.start, end:s.end, vol:volOf(s), mute:!!s.mute}; }
+function metaOf(s){ return {id:s.id, slot:s.slot, v:s.v, fx:s.fx, pts:s.pts ? s.pts.map(function(p){ return p.slice(); }) : null, buds:s.buds.map(function(b){ return {u:b.u, m:b.m ? 1 : 0, cx:b.cx || 0, cy:b.cy || 0}; }), N:s.N, start:s.start, end:s.end, vol:volOf(s), mute:!!s.mute, smear:s.smear ? {u0:s.smear.u0, u1:s.smear.u1} : null}; }
 function updateUndoBtn(){ $('#undoBtn').disabled = !undoStack.length; }
 function pushUndo(){ undoStack.push(sounds.map(metaOf)); if (undoStack.length > 40) undoStack.shift(); updateUndoBtn(); }
 function undo(){
@@ -703,7 +703,7 @@ function undo(){
   sn.forEach(function(m){
     var s = sounds.filter(function(x){ return x.id === m.id; })[0];
     if (!s){ s = graveyard.get(m.id); if (!s) return; graveyard.delete(m.id); sounds.push(s); }      // deleted ones come back
-    s.slot = m.slot; s.v = m.v; s.fx = m.fx; s.pts = m.pts; s.N = m.N; s.start = m.start; s.end = m.end; s.vol = m.vol; s.mute = m.mute;
+    s.slot = m.slot; s.v = m.v; s.fx = m.fx; s.pts = m.pts; s.N = m.N; s.start = m.start; s.end = m.end; s.vol = m.vol; s.mute = m.mute; s.smear = m.smear;
     s.buds = m.buds.map(function(x){ return {u:x.u, m:x.m, cx:x.cx || 0, cy:x.cy || 0, pop:0}; });
     s.wv = waveBars(s); buildGeo(s); applyFx(s); dbPut(s);
   });
@@ -836,6 +836,38 @@ function playRev(s, t, rate, vol){
   src.start(t, Math.max(0, s.dur - s.end), len); src.stop(t + dur + 0.05);
   s.voices = (s.voices || []).filter(function(x){ return x.end > t; }); s.voices.push({g:gn, end:t + dur});
 }
+/* Smear: the seed's sound is stretched along the stalk. Bottom of the stalk = start of the sound,
+   top = end. As the light climbs, overlapping grains are read from that point in the sound, so it
+   never has a start or an end. Only one stalk can carry a smear at a time. */
+function smearBus(s){
+  if (s.smIn) return s.smIn;
+  var C = chan(s), lp = filt('lowpass', 4200, 0.4);
+  s.smIn = gainNode(1); s.smIn.connect(lp); lp.connect(C.in);
+  var wet = gainNode(0.55); s.smIn.connect(wet); wet.connect(A.verb);
+  return s.smIn;
+}
+function smearAmp(sm, u){
+  if (sm.u0 <= 0.03 && sm.u1 >= 0.97) return 1;                 // painted end to end: never stops
+  var e = 0.07; return clamp((u - sm.u0 + e)/(2*e), 0, 1)*clamp((sm.u1 - u + e)/(2*e), 0, 1);
+}
+function smearGrains(s, t0, half, tk){
+  var sm = s.smear, G2 = 2*s.N, n = clamp(Math.round(half*15), 2, 8), bus = smearBus(s), b = buf(s), len = Math.max(0.05, s.end - s.start);
+  for (var k=0;k<n;k++){
+    var f = (k + Math.random()*0.8)/n, gt = t0 + f*half;
+    var uL = warp(s, ((tk % G2) + f)/G2), amp = smearAmp(sm, uL);
+    if (amp < 0.02) continue;
+    var size = (0.16 + Math.random()*0.18)*(1 - S.wind*0.35), rate = (Math.random() < 0.22 ? 0.5 : 1)*Math.pow(2, (Math.random() - 0.5)*0.012);
+    var jit = (Math.random() - 0.5)*(0.05 + S.wind*0.25)*len;
+    var off = clamp(s.start + uL*len + jit, 0, Math.max(0, s.dur - size*rate - 0.01));
+    var src = ctx.createBufferSource(); src.buffer = b; src.playbackRate.value = rate;
+    var gn = ctx.createGain(), gv = 0.3*s.norm*amp;
+    gn.gain.setValueAtTime(0, gt); gn.gain.linearRampToValueAtTime(gv, gt + size*0.5); gn.gain.linearRampToValueAtTime(0, gt + size);
+    src.connect(gn);
+    var node = gn;
+    if (panOK){ var p = ctx.createStereoPanner(); p.pan.value = (Math.random()*2 - 1)*(0.35 + S.wind*0.5); gn.connect(p); node = p; }
+    node.connect(bus); src.start(gt, off); src.stop(gt + size + 0.02);
+  }
+}
 function trigger(s, t, semi, vol, rev){
   var rate = Math.pow(2, semi/12), gr = fxOf(s,'grains');
   chan(s); rev = rev || 0;
@@ -864,7 +896,9 @@ function schedule(){
   while (nextT < ahead){
     vq.push({t:nextT, tick:tick});
     for (var i=0;i<sounds.length;i++){
-      var s = sounds[i]; if (!s.geo || !s.buds.length || s.mute || (compass && compass.s === s)) continue;
+      var s = sounds[i]; if (!s.geo || s.mute || (compass && compass.s === s)) continue;
+      if (s.smear) smearGrains(s, nextT, half, tick);
+      if (!s.buds.length) continue;
       var G2 = 2*s.N, j = tick % G2, fired = false;
       for (var k=0;k<s.buds.length;k++){
         var b = s.buds[k]; if (qOf(s, b) % G2 !== j) continue;
@@ -1183,6 +1217,19 @@ function toggleMute(s){
   dbPut(s);
   if (s.mute && !muteTold){ muteTold = true; toast('Stilkurinn sefur. Haltu aftur inni á fræinu til að vekja hann.'); }
 }
+var stroke = null;
+function applySmear(st){
+  var s = st.s;
+  if (st.erase){ pushUndo(); s.smear = null; dbPut(s); return; }
+  if (st.u1 - st.u0 < 0.06) return;
+  pushUndo();
+  var u0 = clamp(st.u0, 0, 1), u1 = clamp(st.u1, 0, 1);
+  if (u0 < 0.04) u0 = 0; if (u1 > 0.96) u1 = 1;
+  sounds.forEach(function(o){ if (o !== s && o.smear){ o.smear = null; dbPut(o); } });      // only one stalk can be smeared
+  s.smear = s.smear ? {u0:Math.min(s.smear.u0, u0), u1:Math.max(s.smear.u1, u1)} : {u0:u0, u1:u1};
+  s.shake = 1; dbPut(s);
+  if (s.geo){ var q = pointAt(s.geo.Q, s.geo, (s.smear.u0 + s.smear.u1)/2); ripples.push({x:q.x, y:q.y, t0:T, col:colOf(s), big:1}); }
+}
 cv.addEventListener('pointerdown', function(e){
   e.preventDefault(); ensureCtx(); closePop();
   var p = pos(e), hit = hitTest(p); if (!hit) return;
@@ -1202,6 +1249,12 @@ cv.addEventListener('pointermove', function(e){
   }
   if (!gest.moved) return;
   if (h.k === 'seed' && draft) addDraftPoint(p);
+  else if (h.k === 'stalk' && h.s.geo){
+    var ns = nearestOnStalk(h.s, p);
+    if (!gest.sm) gest.sm = {s:h.s, u0:h.u, u1:h.u, erase:!!(h.s.smear && h.u >= h.s.smear.u0 - 0.03 && h.u <= h.s.smear.u1 + 0.03)};
+    if (ns.d < 46){ gest.sm.u0 = Math.min(gest.sm.u0, ns.u); gest.sm.u1 = Math.max(gest.sm.u1, ns.u); }
+    stroke = gest.sm;
+  }
   else if (h.k === 'bud'){
     if (!compass) openCompass(h.s, h.b);
     if (!gest.changed){ pushUndo(); gest.changed = true; }
@@ -1217,14 +1270,18 @@ cv.addEventListener('pointermove', function(e){
 });
 function endGest(e, cancel){
   if (!gest || (e && e.pointerId !== gest.pid)) return;
-  var G = gest, h = G.hit; gest = null; clearTimeout(G.hold); clearTimeout(G.show); closeCompass();
+  var G = gest, h = G.hit; gest = null; clearTimeout(G.hold); clearTimeout(G.show); closeCompass(); if (cancel) stroke = null;
   if (cancel){ draft = null; return; }
   if (h.k === 'seed'){ if (G.held) draft = null; else if (G.moved) finishDraft(); else openPop(h.s); }
   else if (h.k === 'bud'){
     if (G.moved){ dbPut(h.s); if (ctx) playBud(h.s, h.b, ctx.currentTime + 0.01, 1); }
     else if (performance.now() - G.t0 < 320){ var i = h.s.buds.indexOf(h.b); if (i >= 0){ pushUndo(); if (!h.b.m){ h.b.m = 1; h.b.pop = 0.7; } else h.s.buds.splice(i, 1); } dbPut(h.s); updateHint(); }
   }
-  else if (h.k === 'stalk'){ var p = e ? pos(e) : null; if (!p || Math.hypot(p.x - G.x0, p.y - G.y0) < 16) addBud(h.s, h.u); }
+  else if (h.k === 'stalk'){
+    var p = e ? pos(e) : null; stroke = null;
+    if (!p || Math.hypot(p.x - G.x0, p.y - G.y0) < 16) addBud(h.s, h.u);
+    else if (G.sm) applySmear(G.sm);
+  }
 }
 cv.addEventListener('pointerup', function(e){ endGest(e, false); });
 cv.addEventListener('pointercancel', function(e){ endGest(e, true); });
@@ -1315,7 +1372,7 @@ $('#pVol').addEventListener('input', function(e){
 });
 $('#pVol').addEventListener('change', function(){ volArmed = false; var s = popS; if (!s) return; dbPut(s); preview(s); });
 $('#pPlay').addEventListener('click', function(){ if (popS) preview(popS); });
-$('#pCut').addEventListener('click', function(){ var s = popS; if (!s) return; pushUndo(); s.pts = null; s.buds = []; s.N = 0; s.geo = null; dbPut(s); closePop(); updateHint(); });
+$('#pCut').addEventListener('click', function(){ var s = popS; if (!s) return; pushUndo(); s.pts = null; s.buds = []; s.N = 0; s.geo = null; s.smear = null; dbPut(s); closePop(); updateHint(); });
 $('#pDel').addEventListener('click', function(){
   if (!popS) return;
   if (!delArmed){ delArmed = true; $('#pDel').classList.add('warn'); return; }
@@ -1418,6 +1475,8 @@ function drawStalk(s, vpos, dt){
     E[i*4] = Q[i].x + nx; E[i*4+1] = Q[i].y + ny; E[i*4+2] = Q[i].x - nx; E[i*4+3] = Q[i].y - ny;
   }
   g.lineCap = 'round'; g.lineJoin = 'round';
+  var smv = (stroke && stroke.s === s) ? stroke : s.smear;
+  if (smv) drawSmear(s, Q, G, smv, up, col, mis, smv === stroke);
   ga(0.5); g.fillStyle = mis; stemPath(E, n, 2.5, 3); g.fill();
   var lv = s.leaves || [];
   for (i=0;i<lv.length;i++) drawLeaf(Q, G, lv[i], wnd*amp, mis, 2, 2.5, 0.45);
@@ -1452,6 +1511,26 @@ function drawStalk(s, vpos, dt){
   GA = 1; ga(1);
 }
 var WT = 0;                                    // wind clock: runs faster the harder it blows
+function drawSmear(s, Q, G, sm, up, col, mis, preview){
+  var n = Q.length, i, i0 = -1, i1 = -1;
+  for (i=0;i<n;i++){ var u = G.cum[i]/G.len; if (u >= sm.u0 - 0.001 && i0 < 0) i0 = i; if (u <= sm.u1 + 0.001) i1 = i; }
+  if (i0 < 0 || i1 <= i0) return;
+  var lit = up >= 0 ? smearAmp(sm, up) : 0, br = 0.75 + 0.25*Math.sin(T*1.7 + s.ph) + lit*0.6;
+  if (preview && sm.erase) br *= 0.35 + 0.25*Math.sin(T*18);
+  function seg(){ g.beginPath(); g.moveTo(Q[i0].x, Q[i0].y); for (var k=i0+1;k<=i1;k++) g.lineTo(Q[k].x, Q[k].y); }
+  g.lineCap = 'round'; g.lineJoin = 'round';
+  ga(0.1*br); g.strokeStyle = mis; g.lineWidth = 34; g.save(); g.translate(3, 4); seg(); g.stroke(); g.restore();
+  ga(0.12*br); g.strokeStyle = col; g.lineWidth = 30; seg(); g.stroke();
+  ga(0.16*br); g.lineWidth = 17; seg(); g.stroke();
+  if (dotsL){ ga(0.9*br); g.strokeStyle = dotsL; g.lineWidth = 26; seg(); g.stroke(); }
+  /* specks drifting upward through the haze */
+  g.fillStyle = col;
+  for (var k=0;k<7;k++){
+    var f = (T*0.05 + k/7 + s.ph) % 1, uu = sm.u0 + f*(sm.u1 - sm.u0), q = pointAt(Q, G, uu);
+    ga((0.25 + lit*0.5)*Math.sin(f*Math.PI)); g.beginPath(); g.arc(q.x + Math.sin(T*1.3 + k*2.1)*9, q.y, 1.4 + (k % 3)*0.7, 0, 6.2832); g.fill();
+  }
+  ga(1);
+}
 function windAt(x){ return (Math.sin(WT*0.55 - x*0.007)*0.6 + Math.sin(WT*0.21 - x*0.003 + 1.3)*0.4 + Math.sin(WT*1.3 - x*0.013)*0.16)*(0.18 + S.wind*2.5); }
 /* Day and night: tints the sky, moves a sun and a moon, and opens or closes the tone of the whole meadow */
 var skyD = 0.5, skyT0 = performance.now(), skyLast = -1;
@@ -1895,7 +1974,7 @@ function tx(store, md, fn){
   });
 }
 function dbPut(s){
-  tx('sounds','readwrite', function(st){ return st.put({id:s.id, data:s.data, sr:s.sr, start:s.start, end:s.end, norm:s.norm, slot:s.slot, v:s.v, fx:s.fx, vol:volOf(s), mute:!!s.mute, col:s.col, shp:s.shp, pts:s.pts, N:s.N, t:s.t,
+  tx('sounds','readwrite', function(st){ return st.put({id:s.id, data:s.data, sr:s.sr, start:s.start, end:s.end, norm:s.norm, slot:s.slot, v:s.v, fx:s.fx, vol:volOf(s), mute:!!s.mute, smear:s.smear || null, col:s.col, shp:s.shp, pts:s.pts, N:s.N, t:s.t,
     buds:s.buds.map(function(b){ return {u:b.u, m:b.m ? 1 : 0, cx:b.cx || 0, cy:b.cy || 0}; })}); });
 }
 function dbDel(id){ tx('sounds','readwrite', function(st){ return st.delete(id); }); }
@@ -1906,7 +1985,7 @@ async function loadAll(){
   list.sort(function(a,b){ return a.t - b.t; });
   list.forEach(function(o){
     if (!o || !o.data || sounds.some(function(s){ return s.slot === o.slot; })) return;
-    o.dur = o.data.length/o.sr; o.buds = (o.buds || []).map(function(b){ return {u:typeof b.u === 'number' ? b.u : clamp(b.j/(2*(o.N || 8)), 0.02, 1), m:b.m ? 1 : 0, cx:+b.cx || 0, cy:+b.cy || 0, pop:0}; });
+    o.dur = o.data.length/o.sr; if (!(o.smear && o.smear.u1 > o.smear.u0)) o.smear = null; o.buds = (o.buds || []).map(function(b){ return {u:typeof b.u === 'number' ? b.u : clamp(b.j/(2*(o.N || 8)), 0.02, 1), m:b.m ? 1 : 0, cx:+b.cx || 0, cy:+b.cy || 0, pop:0}; });
     o.ph = Math.random()*6.28; o.pop = 0; o.shake = 0; o.wv = waveBars(o);
     if (o.fx && !FX[o.fx]) o.fx = null;
     sounds.push(o);
